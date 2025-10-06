@@ -96,41 +96,35 @@ class GameResultsManager:
     def has_different_suits(self, group_str: str) -> bool:
         """
         Vérifie si un groupe contient 3 cartes de SYMBOLES DIFFÉRENTS
-        Retourne True si les 3 symboles (♠️, ♥️, ♦️, ♣️) sont tous différents
+        Retourne True si les 3 symboles sont tous différents
         
-        Combinaisons valides (24 au total):
-        ♠️ ♥️ ♣️, ♠️ ♥️ ♦️, ♠️ ♣️ ♦️, ♥️ ♣️ ♦️ (et toutes leurs permutations)
+        Combinaisons valides (24 au total) - toutes permutations de:
+        ♠️ ❤️ ♣️ | ♠️ ❤️ ♦️ | ♠️ ♣️ ♦️ | ❤️ ♣️ ♦️
+        
+        Supporte: ♠️ ♠ | ❤️ ❤ ♥️ ♥ | ♦️ ♦ | ♣️ ♣
         """
-        # Normaliser d'abord les emojis cœur ❤️ en ♥️
-        normalized_group = group_str.replace('❤️', '♥️').replace('❤', '♥')
+        # Normaliser TOUS les symboles de cœur vers ♥
+        normalized = group_str.replace('❤️', '♥').replace('❤', '♥').replace('♥️', '♥')
         
-        # Définir les 4 symboles possibles avec leurs emojis complets
-        suits_with_emoji = ['♠️', '♥️', '♦️', '♣️']
-        suits_simple = ['♠', '♥', '♦', '♣']
+        # Normaliser les autres symboles (enlever le modificateur emoji U+FE0F)
+        normalized = normalized.replace('♠️', '♠').replace('♦️', '♦').replace('♣️', '♣')
         
-        # Compter combien de fois chaque symbole apparaît
+        # Les 4 symboles de base
+        suits = ['♠', '♥', '♦', '♣']
+        
+        # Compter chaque symbole
         suit_counts = {}
-        for i, suit in enumerate(suits_simple):
-            # D'abord chercher la version emoji complète
-            emoji_count = normalized_group.count(suits_with_emoji[i])
-            
-            # Ensuite, enlever les emojis et chercher les symboles simples restants
-            temp_str = normalized_group
-            for emoji in suits_with_emoji:
-                temp_str = temp_str.replace(emoji, '')
-            simple_count = temp_str.count(suit)
-            
-            total_count = emoji_count + simple_count
-            if total_count > 0:
-                suit_counts[suit] = total_count
+        for suit in suits:
+            count = normalized.count(suit)
+            if count > 0:
+                suit_counts[suit] = count
         
-        # Pour avoir 3 symboles différents :
-        # 1. Il faut exactement 3 symboles distincts
-        # 2. Chaque symbole doit apparaître exactement 1 fois
+        # Validation stricte pour 3 couleurs différentes:
+        # - Exactement 3 symboles distincts présents
+        # - Chaque symbole apparaît exactement 1 fois
         if len(suit_counts) != 3:
             return False
         
-        # Vérifier que chaque symbole apparaît exactement 1 fois
         return all(count == 1 for count in suit_counts.values())
     
     def determine_winner(self, message: str, first_group: str, second_group: str) -> Optional[str]:
@@ -228,12 +222,14 @@ class GameResultsManager:
         """
         Traite un message et stocke le résultat si les conditions sont remplies
         
-        Conditions:
-        - Le message doit être finalisé (contenir ✅ ou 🔰)
+        NOUVELLES RÈGLES:
         - Ne PAS contenir ⏰ (message en cours)
-        - Exactement 3 cartes dans le PREMIER groupe de parenthèses uniquement
-        - PAS 3 cartes dans le deuxième groupe (sinon on ignore)
-        - Le gagnant doit être identifiable (pas de match nul)
+        - Ne PAS contenir 🔰 (on ignore ces messages)
+        - Doit contenir ✅ (message finalisé)
+        - Si premier groupe a 3 cartes différentes → Victoire JOUEUR
+        - Si deuxième groupe a 3 cartes différentes → Victoire BANQUIER
+        - Si les deux ont 3 cartes différentes → NE RIEN enregistrer
+        - Ne pas enregistrer les numéros consécutifs (N puis N+1)
         
         Retourne: (succès, message_info)
         """
@@ -241,15 +237,20 @@ class GameResultsManager:
             # Log du message complet pour debug
             print(f"📩 Message reçu: {message[:150]}...")
             
-            # VÉRIFICATION 1: Le message doit être finalisé
+            # VÉRIFICATION 1: Le message NE doit PAS être en cours
             if '⏰' in message:
                 print(f"⏰ Message en cours d'édition, attente de finalisation...")
                 return False, "Message en cours d'édition (symbole ⏰)"
             
-            # VÉRIFICATION 2: Le message doit contenir un symbole de finalisation
-            if '✅' not in message and '🔰' not in message:
-                print(f"⚠️ Message non finalisé (pas de ✅ ou 🔰)")
-                return False, "Message non finalisé (pas de symbole ✅ ou 🔰)"
+            # VÉRIFICATION 2: Le message NE doit PAS contenir 🔰
+            if '🔰' in message:
+                print(f"🔰 Message avec symbole 🔰, on ignore")
+                return False, "Message avec symbole 🔰 (ignoré)"
+            
+            # VÉRIFICATION 3: Le message doit contenir ✅
+            if '✅' not in message:
+                print(f"⚠️ Message non finalisé (pas de ✅)")
+                return False, "Message non finalisé (pas de symbole ✅)"
             
             print(f"✅ Message finalisé détecté, traitement en cours...")
             
@@ -258,6 +259,22 @@ class GameResultsManager:
             if game_number is None:
                 print(f"❌ Pas de numéro de jeu trouvé dans: {message[:100]}")
                 return False, "Pas de numéro de jeu trouvé"
+            
+            # Charger les résultats existants
+            results = self._load_yaml()
+            
+            # Vérifier si ce jeu n'est pas déjà stocké
+            if any(r.get('numero') == game_number for r in results):
+                print(f"ℹ️ Jeu #{game_number} déjà enregistré")
+                return False, f"Jeu #{game_number} déjà enregistré"
+            
+            # Vérifier les numéros consécutifs contre TOUS les numéros enregistrés
+            if results:
+                for result in results:
+                    stored_number = result.get('numero', 0)
+                    if game_number == stored_number + 1:
+                        print(f"⚠️ Numéro consécutif détecté (numéro {stored_number} déjà enregistré, actuel: {game_number}), message ignoré")
+                        return False, f"Numéro consécutif ignoré ({stored_number} → {game_number})"
             
             # Extraire les groupes de parenthèses
             groups = self.extract_parentheses_groups(message)
@@ -274,41 +291,31 @@ class GameResultsManager:
             
             print(f"📊 Jeu #{game_number}: Groupe 1 = {first_count} cartes ({first_group}), Groupe 2 = {second_count} cartes ({second_group})")
             
-            # RÈGLE 1: Le premier groupe doit avoir exactement 3 cartes
-            if first_count != 3:
-                print(f"⚠️ Premier groupe n'a pas exactement 3 cartes ({first_count}), message ignoré")
-                return False, f"Premier groupe n'a pas exactement 3 cartes ({first_count})"
+            # Vérifier si chaque groupe a 3 cartes de couleurs différentes
+            first_has_different_suits = (first_count == 3) and self.has_different_suits(first_group)
+            second_has_different_suits = (second_count == 3) and self.has_different_suits(second_group)
             
-            # RÈGLE 2: Le premier groupe doit avoir 3 cartes de COULEURS DIFFÉRENTES
-            first_has_different_suits = self.has_different_suits(first_group)
-            if not first_has_different_suits:
-                print(f"⚠️ Premier groupe n'a pas 3 couleurs différentes ({first_group}), message ignoré")
-                return False, "Premier groupe n'a pas 3 couleurs différentes"
+            # NOUVELLE LOGIQUE DE DÉTERMINATION DU GAGNANT
+            winner = None
             
-            # RÈGLE 3: Si le deuxième groupe a 3 cartes de couleurs différentes, on ignore
-            if second_count == 3:
-                second_has_different_suits = self.has_different_suits(second_group)
-                if second_has_different_suits:
-                    print(f"⚠️ Les deux groupes ont 3 cartes de couleurs différentes, message ignoré (pas de prédiction)")
-                    return False, "Les deux groupes ont 3 couleurs différentes - pas de prédiction"
+            if first_has_different_suits and second_has_different_suits:
+                # Les deux ont 3 cartes différentes → on ignore
+                print(f"⚠️ Les deux groupes ont 3 cartes de couleurs différentes, message ignoré")
+                return False, "Les deux groupes ont 3 couleurs différentes - pas d'enregistrement"
+            elif first_has_different_suits and not second_has_different_suits:
+                # Premier groupe a 3 cartes différentes → Victoire JOUEUR
+                winner = 'Joueur'
+                print(f"🎯 Premier groupe a 3 cartes différentes → Victoire JOUEUR")
+            elif not first_has_different_suits and second_has_different_suits:
+                # Deuxième groupe a 3 cartes différentes → Victoire BANQUIER
+                winner = 'Banquier'
+                print(f"🎯 Deuxième groupe a 3 cartes différentes → Victoire BANQUIER")
+            else:
+                # Aucun groupe n'a 3 cartes différentes → on ignore
+                print(f"⚠️ Aucun groupe n'a 3 cartes de couleurs différentes, message ignoré")
+                return False, "Aucun groupe avec 3 couleurs différentes"
             
-            # RÈGLE 4: Le deuxième groupe peut avoir 2 ou 3 cartes, mais pas toutes différentes si 3 cartes
-            # Cette vérification est déjà faite ci-dessus avec la règle 3
-            
-            # Déterminer le gagnant (Joueur ou Banquier)
-            winner = self.determine_winner(message, first_group, second_group)
-            print(f"🎯 Gagnant détecté: {winner}")
-            
-            # Ignorer les matchs nuls (aucun gagnant clair)
-            if winner is None:
-                print(f"⚠️ Match nul ou gagnant non identifiable, message ignoré (pas de prédiction)")
-                return False, "Match nul - pas de prédiction"
-            
-            # Vérifier si ce jeu n'est pas déjà stocké
-            results = self._load_yaml()
-            if any(r.get('numero') == game_number for r in results):
-                print(f"ℹ️ Jeu #{game_number} déjà enregistré")
-                return False, f"Jeu #{game_number} déjà enregistré"
+            # Si on arrive ici, on a un gagnant valide
             
             # Extraire date et heure du message
             date_str, time_str = self.extract_datetime_from_message(message)

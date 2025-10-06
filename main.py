@@ -34,7 +34,7 @@ try:
     API_HASH = os.getenv('API_HASH') or ''
     BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
     ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
-    PORT = int(os.getenv('PORT') or '10000')
+    PORT = int(os.getenv('PORT') or '5000')
 
     # Validation des variables requises
     if not API_ID or API_ID == 0:
@@ -56,7 +56,7 @@ CONFIG_FILE = 'bot_config.json'
 # Variables globales
 detected_stat_channel = None
 confirmation_pending = {}
-transfer_enabled = True  # Contrôle le transfert des messages
+transfer_enabled = True
 
 # Gestionnaires
 yaml_manager = YAMLDataManager()
@@ -92,7 +92,6 @@ def save_config():
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2)
 
-        # Aussi sauvegarder dans YAML
         if yaml_manager:
             yaml_manager.set_config('stat_channel', detected_stat_channel)
 
@@ -105,15 +104,10 @@ async def start_bot():
     """Démarre le bot"""
     try:
         logger.info("🚀 DÉMARRAGE DU BOT...")
-
-        # Charger la configuration
         load_config()
-
-        # Démarrer le client Telegram
         await client.start(bot_token=BOT_TOKEN)
         logger.info("✅ Bot Telegram connecté")
 
-        # Obtenir les infos du bot
         me = await client.get_me()
         username = getattr(me, 'username', 'Unknown') or f"ID:{getattr(me, 'id', 'Unknown')}"
         logger.info(f"✅ Bot opérationnel: @{username}")
@@ -144,24 +138,20 @@ async def handler_join(event):
             if event.user_id == me_id:
                 channel_id = event.chat_id
 
-                # Normaliser l'ID si nécessaire
                 if str(channel_id).startswith('-207') and len(str(channel_id)) == 14:
                     channel_id = int('-100' + str(channel_id)[4:])
 
-                # Éviter les doublons
                 if channel_id in confirmation_pending:
                     return
 
                 confirmation_pending[channel_id] = 'waiting_confirmation'
 
-                # Obtenir les infos du canal
                 try:
                     chat = await client.get_entity(channel_id)
                     chat_title = getattr(chat, 'title', f'Canal {channel_id}')
                 except:
                     chat_title = f'Canal {channel_id}'
 
-                # Envoyer l'invitation à l'admin
                 invitation_msg = f"""🔔 **Nouveau canal détecté**
 
 📋 **Canal** : {chat_title}
@@ -188,7 +178,6 @@ async def set_channel(event):
     global detected_stat_channel, confirmation_pending
 
     try:
-        # Seulement en privé avec l'admin
         if event.is_group or event.is_channel:
             return
 
@@ -196,19 +185,15 @@ async def set_channel(event):
             await event.respond("❌ Seul l'administrateur peut configurer les canaux")
             return
 
-        # Extraire l'ID du canal
         match = event.pattern_match
         channel_id = int(match.group(1))
 
-        # Vérifier si le canal est en attente
         if channel_id not in confirmation_pending:
             await event.respond("❌ Ce canal n'est pas en attente de configuration")
             return
 
         detected_stat_channel = channel_id
         confirmation_pending[channel_id] = 'configured'
-
-        # Sauvegarder
         save_config()
 
         try:
@@ -234,20 +219,17 @@ Utilisez /fichier pour exporter les résultats.""")
         logger.error(f"❌ Erreur set_channel: {e}")
 
 
-# Dictionnaire pour stocker les messages transférés {canal_message_id: admin_message_id}
 transferred_messages = {}
 
-# --- TRAITEMENT DES MESSAGES ---
+
 @client.on(events.NewMessage())
 async def handle_message(event):
     """Traite les messages entrants"""
     try:
-        # Ignorer les messages du bot lui-même
         me = await client.get_me()
         if event.sender_id == me.id:
             return
 
-        # Gérer les confirmations en privé
         if not event.is_group and not event.is_channel:
             if event.sender_id in confirmation_pending:
                 pending_action = confirmation_pending.get(event.sender_id)
@@ -256,11 +238,9 @@ async def handle_message(event):
                     if message_text == 'OUI':
                         await event.respond("🔄 **Remise à zéro en cours...**")
 
-                        # Réinitialiser la base de données
                         results_manager._save_yaml([])
                         logger.info("✅ Base de données remise à zéro manuellement")
 
-                        # Créer un nouveau fichier Excel vide
                         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                         new_file_path = f"resultats_{timestamp}.xlsx"
                         empty_file = results_manager.export_to_txt(file_path=new_file_path)
@@ -273,8 +253,6 @@ async def handle_message(event):
                             )
 
                         await event.respond("✅ **Remise à zéro effectuée**\n\nLa base de données a été réinitialisée avec succès!")
-
-                        # Retirer la confirmation en attente
                         del confirmation_pending[event.sender_id]
                         return
                     else:
@@ -282,35 +260,36 @@ async def handle_message(event):
                         del confirmation_pending[event.sender_id]
                         return
 
-        # Vérifier si c'est un message du canal surveillé
         if detected_stat_channel and event.chat_id == detected_stat_channel:
             message_text = event.message.message
-
-            # Log de tous les messages reçus
             logger.info(f"📨 Message du canal: {message_text[:100]}...")
 
-            # TRANSFERT AUTOMATIQUE: Envoyer une copie du message à l'admin (si activé)
             if transfer_enabled:
                 try:
                     transfer_msg = f"📨 **Message du canal:**\n\n{message_text}"
                     sent_msg = await client.send_message(ADMIN_ID, transfer_msg)
-                    # Stocker l'association entre le message du canal et celui envoyé
                     transferred_messages[event.message.id] = sent_msg.id
                 except Exception as e:
                     logger.error(f"❌ Erreur transfert message: {e}")
 
-            # Traiter le message avec le gestionnaire de résultats
             success, info = results_manager.process_message(message_text)
 
             if success:
                 logger.info(f"✅ {info}")
-                # Notifier l'admin
                 try:
-                    await client.send_message(ADMIN_ID, f"✅ Partie enregistrée!\n{info}")
-                except:
-                    pass
+                    stats = results_manager.get_stats()
+                    notification = f"""✅ **Partie enregistrée!**
+
+{info}
+
+📊 **Statistiques actuelles:**
+• Total: {stats['total']} parties
+• Joueur: {stats['joueur_victoires']} ({stats['taux_joueur']:.1f}%)
+• Banquier: {stats['banquier_victoires']} ({stats['taux_banquier']:.1f}%)"""
+                    await client.send_message(ADMIN_ID, notification)
+                except Exception as e:
+                    logger.error(f"Erreur notification: {e}")
             else:
-                # Log pour comprendre pourquoi les messages sont ignorés
                 logger.info(f"⚠️ Message ignoré: {info}")
 
     except Exception as e:
@@ -323,13 +302,10 @@ async def handle_message(event):
 async def handle_edited_message(event):
     """Traite les messages édités"""
     try:
-        # Vérifier si c'est un message du canal surveillé
         if detected_stat_channel and event.chat_id == detected_stat_channel:
             message_text = event.message.message
-
             logger.info(f"✏️ Message édité dans le canal: {message_text[:100]}...")
 
-            # Si on a transféré ce message, éditer la copie (si le transfert est activé)
             if transfer_enabled:
                 if event.message.id in transferred_messages:
                     admin_msg_id = transferred_messages[event.message.id]
@@ -340,7 +316,6 @@ async def handle_edited_message(event):
                     except Exception as e:
                         logger.error(f"❌ Erreur édition message transféré: {e}")
                 else:
-                    # Si le message n'était pas dans notre cache, l'envoyer comme nouveau
                     try:
                         transfer_msg = f"📨 **Message du canal (✏️ ÉDITÉ - nouveau):**\n\n{message_text}"
                         sent_msg = await client.send_message(ADMIN_ID, transfer_msg)
@@ -348,12 +323,10 @@ async def handle_edited_message(event):
                     except Exception as e:
                         logger.error(f"❌ Erreur transfert message édité: {e}")
 
-            # Retraiter le message avec le gestionnaire de résultats
             success, info = results_manager.process_message(message_text)
 
             if success:
                 logger.info(f"✅ {info}")
-                # Notifier l'admin de la partie enregistrée (message édité finalisé)
                 try:
                     stats = results_manager.get_stats()
                     notification = f"""✅ **Partie enregistrée (message finalisé)!**
@@ -368,7 +341,6 @@ async def handle_edited_message(event):
                 except Exception as e:
                     logger.error(f"Erreur notification: {e}")
             else:
-                # Ne pas notifier pour les messages en cours (⏰)
                 if "en cours d'édition" not in info:
                     logger.info(f"⚠️ Message édité ignoré: {info}")
 
@@ -378,7 +350,6 @@ async def handle_edited_message(event):
         logger.error(traceback.format_exc())
 
 
-# --- COMMANDES ---
 @client.on(events.NewMessage(pattern='/start'))
 async def cmd_start(event):
     """Commande /start"""
@@ -391,7 +362,7 @@ Ce bot stocke automatiquement les résultats des parties où le premier groupe d
 
 **Commandes disponibles:**
 • `/status` - Voir l'état du bot et les statistiques
-• `/fichier` - Exporter les résultats en fichier TXT
+• `/fichier` - Exporter les résultats en fichier Excel
 • `/help` - Aide détaillée
 
 **Configuration:**
@@ -413,7 +384,6 @@ async def cmd_status(event):
         return
 
     try:
-        # Obtenir les statistiques
         stats = results_manager.get_stats()
 
         status_msg = f"""📊 **STATUT DU BOT**
@@ -454,12 +424,9 @@ async def cmd_fichier(event):
 
     try:
         await event.respond("📊 Génération du fichier Excel en cours...")
-
-        # Générer le fichier avec nom automatique (date + heure)
         file_path = results_manager.export_to_txt()
 
         if file_path and os.path.exists(file_path):
-            # Envoyer le fichier
             await client.send_file(
                 event.chat_id,
                 file_path,
@@ -485,221 +452,173 @@ async def cmd_deploy(event):
         return
 
     try:
-        await event.respond("📦 Préparation du package de déploiement pour Replit...")
+        await event.respond("📦 Préparation du package de déploiement pour Render.com...")
 
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        deploy_zip = f"deploy_replit_{timestamp}.zip"
+        benin_tz = timezone(timedelta(hours=1))
+        now_benin = datetime.now(benin_tz)
+        timestamp = now_benin.strftime('%Y-%m-%d_%H-%M-%S')
+        
+        deploy_dir = Path(f"deploy_render_{timestamp}")
+        deploy_dir.mkdir(exist_ok=True)
 
-        # Créer le fichier .replit temporaire pour Replit
-        replit_content = """language = "python3"
-    run = "python main.py"
+        files_to_copy = [
+            'main.py',
+            'game_results_manager.py',
+            'yaml_manager.py'
+        ]
 
-    [nix]
-    channel = "stable-23_11"
+        for file in files_to_copy:
+            if os.path.exists(file):
+                shutil.copy(file, deploy_dir / file)
 
-    [env]
-    API_ID = ""
-    API_HASH = ""
-    BOT_TOKEN = ""
-    ADMIN_ID = ""
-    PORT = "10000"
-    TZ = "Africa/Porto-Novo"
-    """
+        render_yaml = """services:
+  - type: web
+    name: bot-telegram-bcarte
+    env: python
+    region: frankfurt
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+"""
 
-        with open('.replit', 'w', encoding='utf-8') as f:
-            f.write(replit_content)
-        logger.info("✅ Fichier .replit créé")
+        with open(deploy_dir / 'render.yaml', 'w', encoding='utf-8') as f:
+            f.write(render_yaml)
 
-        # Créer le fichier requirements.txt
-        requirements_content = """telethon==1.34.0
-python-dotenv==1.0.0
-aiohttp==3.9.1
-PyYAML==6.0.1
+        requirements = """telethon==1.35.0
+aiohttp==3.9.5
+python-dotenv==1.0.1
+pyyaml==6.0.1
 openpyxl==3.1.2
 """
 
-        with open('requirements.txt', 'w', encoding='utf-8') as f:
-            f.write(requirements_content)
-        logger.info("✅ Fichier requirements.txt créé")
+        with open(deploy_dir / 'requirements.txt', 'w', encoding='utf-8') as f:
+            f.write(requirements)
+        
+        env_example = """# Variables d'environnement pour le bot Telegram
+# Ne jamais committer ces valeurs réelles !
 
-        # Créer le fichier README.md pour le déploiement
-        readme_content = """# Bot Telegram - Résultats de Jeux Bcarte
-
-Bot Telegram qui enregistre automatiquement les résultats des parties de jeu.
-
-## Déploiement sur Replit
-
-### Prérequis
-- Compte Replit
-- Identifiants Telegram (API_ID, API_HASH, BOT_TOKEN, ADMIN_ID)
-
-### Instructions de déploiement
-
-1. **Créer un nouveau Repl**
-   - Allez sur replit.com
-   - Cliquez sur "Create Repl" → "Import from GitHub" (optionnel)
-   - Ou créez un nouveau Repl Python
-
-2. **Uploader les fichiers**
-   - Uploadez tous les fichiers de ce package
-   - Vérifiez que .replit est présent
-
-3. **Configurer les Secrets**
-   - Cliquez sur l'icône cadenas 🔒 (Secrets)
-   - Ajoutez ces variables :
-     - `API_ID` : Votre Telegram API ID (depuis https://my.telegram.org)
-     - `API_HASH` : Votre Telegram API Hash
-     - `BOT_TOKEN` : Token de votre bot (depuis @BotFather)
-     - `ADMIN_ID` : Votre ID utilisateur Telegram (depuis @userinfobot)
-
-4. **Déployer**
-   - Ouvrez l'onglet "Deployments"
-   - Cliquez sur "Deploy"
-   - Choisissez le type de déploiement :
-     - **Reserved VM** : Pour un bot 24/7 avec coût fixe
-     - **Autoscale** : Pour économiser quand le bot est inactif
-   - Attendez la fin du déploiement
-
-## Fonctionnalités automatiques
-
-### Remise à zéro quotidienne
-- **Heure** : 1h00 du matin (heure béninoise UTC+1)
-- **Action** : La base de données est vidée automatiquement
-- **Export** : Un nouveau fichier Excel vide est créé
-- **Notification** : L'admin reçoit le nouveau fichier Excel
-
-### Export automatique
-- L'intervalle peut être configuré avec `/settime`
-- Exemples : 
+API_ID=votre_api_id
+API_HASH=votre_api_hash
+BOT_TOKEN=votre_bot_token
+ADMIN_ID=votre_admin_id
+PORT=10000
 """
 
-        with open('README.md', 'w', encoding='utf-8') as f:
-            f.write(readme_content)
-        logger.info("✅ Fichier README.md créé")
+        with open(deploy_dir / '.env.example', 'w', encoding='utf-8') as f:
+            f.write(env_example)
 
-        files_to_include = [
-            'main.py',
-            'game_results_manager.py',
-            'yaml_manager.py',
-            'requirements.txt',
-            '.replit',
-            'README.md',
-            '.env.example'
-        ]
+        readme = f"""# Bot Telegram - Package de Déploiement Render.com
 
-        if os.path.exists('runtime.txt'):
-            files_to_include.append('runtime.txt')
+📅 **Créé le:** {now_benin.strftime('%d/%m/%Y à %H:%M:%S')} (Heure Bénin UTC+1)
+📦 **Version:** {timestamp}
 
+## 🚀 Instructions de déploiement sur Render.com
+
+### Étape 1: Créer un repository GitHub
+1. Créez un nouveau repository sur GitHub
+2. Uploadez tous les fichiers de ce package
+
+### Étape 2: Déployer sur Render.com
+1. Connectez-vous à [render.com](https://render.com)
+2. Cliquez sur **"New +"** → **"Web Service"**
+3. Connectez votre repository GitHub
+4. Render détectera automatiquement `render.yaml`
+
+### Étape 3: Configurer les Variables d'Environnement
+Dans la section **Environment** de Render.com, ajoutez:
+- **PORT**: 10000 (déjà configuré)
+- **API_ID**: Obtenez-le sur https://my.telegram.org
+- **API_HASH**: Obtenez-le sur https://my.telegram.org
+- **BOT_TOKEN**: Créez un bot avec @BotFather sur Telegram
+- **ADMIN_ID**: Obtenez votre ID avec @userinfobot sur Telegram
+
+### Étape 4: Déployer
+1. Cliquez sur **"Create Web Service"**
+2. Attendez le déploiement (2-3 minutes)
+3. Le bot sera en ligne 24/7 !
+
+## ✅ Fonctionnalités principales
+
+- ✅ **Détection automatique**: Reconnaît les parties avec 3 cartes différentes
+- ✅ **Export quotidien**: Génère un fichier Excel à 00h59 (UTC+1)
+- ✅ **Réinitialisation auto**: Reset automatique à 01h00
+- ✅ **Statistiques en temps réel**: Taux de victoire Joueur/Banquier
+
+## 📊 Commandes disponibles
+
+- `/start` - Démarrer le bot et voir les informations
+- `/status` - Voir les statistiques actuelles
+- `/fichier` - Exporter les résultats en Excel
+- `/reset` - Réinitialiser la base de données manuellement
+- `/deploy` - Créer un nouveau package de déploiement
+- `/help` - Afficher l'aide complète
+
+## 🎯 Critères d'enregistrement
+
+### ✅ Parties enregistrées:
+- Premier groupe: **exactement 3 cartes de couleurs différentes**
+- Deuxième groupe: **PAS 3 cartes**
+- Gagnant identifiable: **Joueur** ou **Banquier**
+
+### ❌ Parties ignorées:
+- Match nul
+- Les deux groupes ont 3 cartes
+- Pas de numéro de jeu identifiable
+
+## ⚙️ Configuration technique
+
+- **Langage**: Python 3.11
+- **Timezone**: Africa/Porto-Novo (UTC+1)
+- **Port**: 10000 (Render.com)
+- **Export automatique**: 00h59 chaque jour
+- **Reset automatique**: 01h00 chaque jour
+
+---
+*Package généré automatiquement*
+*Dernière mise à jour: {now_benin.strftime('%d/%m/%Y %H:%M:%S')}*
+"""
+
+        with open(deploy_dir / 'README_DEPLOIEMENT.md', 'w', encoding='utf-8') as f:
+            f.write(readme)
+
+        deploy_zip = "Kouamé.zip"
         with zipfile.ZipFile(deploy_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file in files_to_include:
-                if os.path.exists(file):
-                    zipf.write(file, file)
-                    logger.info(f"✅ Ajouté: {file}")
+            for root, dirs, files in os.walk(deploy_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, deploy_dir)
+                    zipf.write(file_path, arcname)
 
-            if os.path.exists('data'):
-                for root, dirs, files in os.walk('data'):
-                    for file in files:
-                        if file.endswith('.yaml'):
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, '.')
-                            zipf.write(file_path, arcname)
-                            logger.info(f"✅ Ajouté: {arcname}")
+        short_caption = f"""📦 **Package Render.com - Kouamé**
 
-        # Caption court pour le fichier
-        short_caption = f"""📦 **Package Replit créé!**
-
-✅ Fichiers inclus
-✅ Configuration complète
+📅 {now_benin.strftime('%d/%m/%Y %H:%M:%S')} (Bénin)
+📁 Kouamé.zip
 ✅ Port 10000 configuré
+✅ Export à 00h59
+✅ Reset à 01h00"""
 
-Voir le message suivant pour les instructions."""
-
-        # Instructions détaillées dans un message séparé
-        detailed_instructions = """**📋 Instructions de déploiement:**
-
-**1️⃣ Contenu du package:**
-• Fichiers Python (main.py, game_results_manager.py, yaml_manager.py)
-• Configuration Replit (.replit avec fuseau horaire UTC+1)
-• Dépendances (requirements.txt)
-• Documentation (README.md)
-
-**2️⃣ Fonctionnalités:**
-🕐 Reset auto à 1h00 (Bénin UTC+1)
-📊 Export auto Excel
-📍 Port 10000
-🏥 Health check /health
-
-**3️⃣ Étapes:**
-1. Uploadez les fichiers dans Replit
-2. Secrets (🔒) :
-   - API_ID (my.telegram.org)
-   - API_HASH
-   - BOT_TOKEN (@BotFather)
-   - ADMIN_ID (@userinfobot)
-3. Onglet Deployments → Deploy
-4. Choisir Reserved VM ou Autoscale
-
-Le bot démarre automatiquement!"""
-
-        # Envoyer le fichier avec caption court
         await client.send_file(
             ADMIN_ID,
             deploy_zip,
             caption=short_caption
         )
-        
-        # Envoyer les instructions détaillées
-        await client.send_message(ADMIN_ID, detailed_instructions)
 
-        logger.info(f"✅ Package de déploiement Replit créé: {deploy_zip}")
-
-        # Nettoyer le fichier .replit temporaire
-        if os.path.exists('.replit'):
-            os.remove('.replit')
-            logger.info("✅ Fichier .replit temporaire supprimé")
+        shutil.rmtree(deploy_dir)
+        logger.info(f"✅ Package créé: {deploy_zip}")
 
     except Exception as e:
         logger.error(f"❌ Erreur création package: {e}")
-        await event.respond(f"❌ Erreur: {e}")
-
-
-@client.on(events.NewMessage(pattern=r'/settime (\d+)(m|h)'))
-async def cmd_settime(event):
-    """Configure l'intervalle d'envoi automatique du fichier"""
-    if event.is_group or event.is_channel:
-        return
-
-    if event.sender_id != ADMIN_ID:
-        await event.respond("❌ Commande réservée à l'administrateur")
-        return
-
-    try:
-        match = event.pattern_match
-        value = int(match.group(1))
-        unit = match.group(2)
-
-        # Convertir en minutes
-        if unit == 'h':
-            interval_minutes = value * 60
-        else:
-            interval_minutes = value
-
-        # Vérifier les limites (5 min à 24h)
-        if interval_minutes < 5 or interval_minutes > 1440:
-            await event.respond("❌ L'intervalle doit être entre 5 minutes et 24 heures")
-            return
-
-        # Sauvegarder la configuration
-        yaml_manager.set_config('auto_export_interval', interval_minutes)
-
-        # Redémarrer la tâche d'export automatique
-        await restart_auto_export_task()
-
-        await event.respond(f"✅ Envoi automatique configuré: toutes les {value}{unit}\n\n⚠️ Remise à zéro quotidienne à 1h00 du matin (heure Bénin UTC+1)")
-        logger.info(f"✅ Intervalle d'export configuré: {interval_minutes} minutes")
-
-    except Exception as e:
-        logger.error(f"❌ Erreur settime: {e}")
         await event.respond(f"❌ Erreur: {e}")
 
 
@@ -768,7 +687,7 @@ async def cmd_help(event):
     if event.is_group or event.is_channel:
         return
 
-    help_msg = """📖 **AIDE - Bot de Stockage de Résultats**
+    help_msg = """📖 **AIDE - Bot de Stockage de Résultats de Jeux**
 
 **Fonctionnement:**
 Le bot surveille un canal et stocke automatiquement les parties qui remplissent ces critères:
@@ -788,16 +707,13 @@ Le bot surveille un canal et stocke automatiquement les parties qui remplissent 
 • `/status` - Voir les statistiques
 • `/fichier` - Exporter en fichier Excel manuellement
 • `/deploy` - Créer un package pour déployer sur Replit
-• `/settime 30m` ou `/settime 2h` - Configurer l'envoi automatique (5min-24h)
 • `/reset` - Remettre à zéro la base de données manuellement
 • `/stop_transfer` - Désactiver le transfert des messages du canal
 • `/start_transfer` - Réactiver le transfert des messages du canal
 • `/help` - Afficher cette aide
 
 **Export automatique:**
-• Le fichier Excel est envoyé automatiquement à l'intervalle défini
 • Remise à zéro automatique à 1h00 du matin (heure Bénin UTC+1) chaque jour
-• Exemples: `/settime 15m`, `/settime 1h`, `/settime 6h`
 
 **Configuration:**
 1. Ajoutez le bot à votre canal Telegram
@@ -816,7 +732,6 @@ Pour toute question, contactez l'administrateur."""
     await event.respond(help_msg)
 
 
-# --- SERVEUR WEB (HEALTH CHECK) ---
 async def index(request):
     """Page d'accueil du bot"""
     html = """
@@ -871,126 +786,78 @@ async def start_web_server():
     logger.info(f"✅ Serveur web démarré sur le port {PORT}")
 
 
-# Variables pour les tâches automatiques
 auto_export_task = None
 
 
-async def auto_export_file():
-    """Envoie automatiquement le fichier Excel à l'intervalle configuré"""
-    while True:
-        try:
-            # Récupérer l'intervalle configuré (en minutes)
-            interval_minutes = yaml_manager.get_config('auto_export_interval', 60)
-
-            # Attendre l'intervalle
-            await asyncio.sleep(interval_minutes * 60)
-
-            # Générer et envoyer le fichier Excel avec nom automatique (date + heure)
-            logger.info("📤 Export automatique du fichier Excel...")
-            file_path = results_manager.export_to_txt()
-
-            if file_path and os.path.exists(file_path):
-                stats = results_manager.get_stats()
-                caption = f"""📄 **Export Automatique**
-
-📊 Statistiques:
-• Total: {stats['total']} parties
-• Joueur: {stats['joueur_victoires']} ({stats['taux_joueur']:.1f}%)
-• Banquier: {stats['banquier_victoires']} ({stats['taux_banquier']:.1f}%)
-
-⏱️ Prochain envoi dans {interval_minutes} minutes"""
-
-                await client.send_file(
-                    ADMIN_ID,
-                    file_path,
-                    caption=caption
-                )
-                logger.info("✅ Fichier Excel exporté automatiquement")
-
-        except asyncio.CancelledError:
-            logger.info("🛑 Tâche d'export automatique arrêtée")
-            break
-        except Exception as e:
-            logger.error(f"❌ Erreur export automatique: {e}")
-            await asyncio.sleep(60)  # Attendre 1 minute avant de réessayer
-
-
 async def daily_reset():
-    """Remise à zéro quotidienne à 1h00 du matin (heure du Bénin UTC+1)"""
+    """Remise à zéro quotidienne à 00h59 du matin (heure du Bénin UTC+1)"""
     while True:
         try:
-            # Créer le fuseau horaire du Bénin (UTC+1)
             benin_tz = timezone(timedelta(hours=1))
-
-            # Obtenir l'heure actuelle au Bénin
             now_benin = datetime.now(benin_tz)
+            next_reset_benin = now_benin.replace(hour=0, minute=59, second=0, microsecond=0)
 
-            # Calculer 1h00 du matin (Bénin)
-            tomorrow_1am_benin = now_benin.replace(hour=1, minute=0, second=0, microsecond=0)
+            if now_benin.hour >= 1 or (now_benin.hour == 0 and now_benin.minute >= 59):
+                next_reset_benin += timedelta(days=1)
 
-            # Si on a dépassé 1h00 aujourd'hui, viser demain
-            if now_benin.hour >= 1:
-                tomorrow_1am_benin += timedelta(days=1)
+            wait_seconds = (next_reset_benin - now_benin).total_seconds()
+            logger.info(f"⏰ Prochaine remise à zéro dans {wait_seconds/3600:.1f} heures (à 00h59 heure Bénin)")
 
-            wait_seconds = (tomorrow_1am_benin - now_benin).total_seconds()
-            logger.info(f"⏰ Prochaine remise à zéro dans {wait_seconds/3600:.1f} heures (à 1h00 heure Bénin)")
-
-            # Attendre jusqu'à 1h00
             await asyncio.sleep(wait_seconds)
 
-            # Effectuer la remise à zéro
-            logger.info("🔄 REMISE À ZÉRO QUOTIDIENNE À 1H00...")
+            logger.info("🔄 REMISE À ZÉRO QUOTIDIENNE À 00H59...")
 
-            # Réinitialiser les données
+            stats = results_manager.get_stats()
+
+            if stats['total'] > 0:
+                date_str = (now_benin - timedelta(days=1)).strftime('%d-%m-%Y')
+                file_path = f"resultats_journee_{date_str}.xlsx"
+                excel_file = results_manager.export_to_txt(file_path=file_path)
+
+                if excel_file and os.path.exists(excel_file):
+                    caption = f"""📊 **Rapport Journalier du {date_str}**
+
+📈 Résultats de la journée (01h00 à 00h59):
+• Total: {stats['total']} parties
+• Victoires Joueur: {stats['joueur_victoires']} ({stats['taux_joueur']:.1f}%)
+• Victoires Banquier: {stats['banquier_victoires']} ({stats['taux_banquier']:.1f}%)
+
+🔄 La base de données va être remise à zéro pour une nouvelle journée."""
+
+                    await client.send_file(
+                        ADMIN_ID,
+                        excel_file,
+                        caption=caption
+                    )
+                    logger.info(f"✅ Rapport journalier envoyé avec {stats['total']} parties")
+            else:
+                await client.send_message(
+                    ADMIN_ID,
+                    "📊 **Rapport Journalier**\n\nAucune partie enregistrée aujourd'hui (01h00 à 00h59)."
+                )
+                logger.info("ℹ️ Aucune donnée à exporter pour aujourd'hui")
+
             results_manager._save_yaml([])
             logger.info("✅ Base de données remise à zéro")
 
-            # Créer un nouveau fichier Excel vide pour la nouvelle journée
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-            new_file_path = f"resultats_{timestamp}.xlsx"
-            empty_file = results_manager.export_to_txt(file_path=new_file_path)
-
-            if empty_file and os.path.exists(empty_file):
-                await client.send_file(
-                    ADMIN_ID,
-                    empty_file,
-                    caption="📄 **Nouveau fichier Excel créé à 1h00**\n\nLe fichier est vide et prêt pour une nouvelle journée."
-                )
-
-            await client.send_message(ADMIN_ID, "🔄 **Remise à zéro automatique effectuée à 1h00**\n\nLa base de données a été réinitialisée pour une nouvelle journée.")
+            await client.send_message(
+                ADMIN_ID,
+                "🔄 **Remise à zéro effectuée à 00h59**\n\nLa base de données est maintenant vide et prête pour une nouvelle journée d'enregistrement."
+            )
 
         except asyncio.CancelledError:
             logger.info("🛑 Tâche de remise à zéro arrêtée")
             break
         except Exception as e:
             logger.error(f"❌ Erreur remise à zéro: {e}")
-            await asyncio.sleep(3600)  # Attendre 1 heure avant de réessayer
+            await asyncio.sleep(3600)
 
 
-async def restart_auto_export_task():
-    """Redémarre la tâche d'export automatique"""
-    global auto_export_task
-
-    # Annuler la tâche existante
-    if auto_export_task and not auto_export_task.done():
-        auto_export_task.cancel()
-        try:
-            await auto_export_task
-        except asyncio.CancelledError:
-            pass
-
-    # Créer une nouvelle tâche
-    auto_export_task = asyncio.create_task(auto_export_file())
-
-
-# --- MAIN ---
 async def main():
     """Fonction principale"""
     try:
-        # Démarrer le serveur web
         await start_web_server()
 
-        # Démarrer le bot
         success = await start_bot()
         if not success:
             logger.error("❌ Échec du démarrage du bot")
@@ -999,12 +866,9 @@ async def main():
         logger.info("✅ Bot complètement opérationnel")
         logger.info("📊 En attente de messages...")
 
-        # Démarrer les tâches automatiques
-        asyncio.create_task(auto_export_file())
         asyncio.create_task(daily_reset())
-        logger.info("✅ Tâches automatiques démarrées (export + remise à zéro)")
+        logger.info("✅ Tâche de remise à zéro démarrée")
 
-        # Garder le bot actif
         await client.run_until_disconnected()
 
     except Exception as e:
