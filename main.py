@@ -34,7 +34,7 @@ try:
     API_HASH = os.getenv('API_HASH') or ''
     BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
     ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
-    PORT = int(os.getenv('PORT') or '5000')
+    PORT = int(os.getenv('PORT') or '10000')
 
     # Validation des variables requises
     if not API_ID or API_ID == 0:
